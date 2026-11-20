@@ -41,12 +41,12 @@ http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
-      // 模擬 GAS 的延遲
+      // 模擬 GAS 的延遲（正式環境一次大約 1.5～3 秒）
       setTimeout(() => {
         const out = gas.context.doPost({ postData: { contents: body } });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(out.text);
-      }, 400);
+      }, Number(process.env.LATENCY || 1500));
     });
     return;
   }

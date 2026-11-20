@@ -46,6 +46,10 @@ const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'title',
 /** GitHub Pages 的網址，setup 用它組出秘密連結 */
 const PAGE_URL = 'https://tjc-km.github.io/MyCalendar/';
 
+/** 「設定」分頁記在快取裡，省掉每次開試算表；在試算表改設定最多 5 分鐘後生效，執行 setup 立即生效 */
+const SETTINGS_CACHE_KEY = 'settings';
+const SETTINGS_CACHE_SECONDS = 300;
+
 const SETTING_ROWS = [
   ['成員1', '老公', '顯示在網頁上的名字。改名後，舊活動的建立人、提出人不會跟著改'],
   ['成員2', '老婆', '同上'],
@@ -70,8 +74,7 @@ function doPost(e) {
 }
 
 function handleRequest(req) {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const settings = readSettings(ss);
+  const settings = readSettings();
   if (!settings.key) {
     fail('還沒有鑰匙：請在 GAS 編輯器執行一次 setup', 'NO_KEY');
   }
@@ -86,6 +89,7 @@ function handleRequest(req) {
   if (settings.members.indexOf(who) < 0) {
     fail('找不到「' + who + '」，請重新選擇你是哪一位', 'WHO');
   }
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   if (req.action === 'list') {
     return listEvents(ss, settings, who, req);
   }
@@ -399,7 +403,13 @@ function shortDate(dateString) {
   return Number(parts[1]) + '/' + Number(parts[2]);
 }
 
-function readSettings(ss) {
+function readSettings() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(SETTINGS_CACHE_KEY);
+  if (cached) {
+    return JSON.parse(cached);
+  }
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const sheet = ss.getSheetByName(SETTING_SHEET);
   if (!sheet) {
     fail('試算表沒有「設定」分頁：請在 GAS 編輯器執行一次 setup');
@@ -413,7 +423,9 @@ function readSettings(ss) {
   if (!members[0] || !members[1] || members[0] === members[1] || members.indexOf(BOTH) >= 0) {
     fail('「設定」分頁的成員1、成員2 要填兩個不同的名字，也不能叫「' + BOTH + '」');
   }
-  return { members: members, key: map['鑰匙'] || '' };
+  const settings = { members: members, key: map['鑰匙'] || '' };
+  cache.put(SETTINGS_CACHE_KEY, JSON.stringify(settings), SETTINGS_CACHE_SECONDS);
+  return settings;
 }
 
 /**
@@ -480,13 +492,15 @@ function nextEmptyRow(table) {
   const sheet = table.sheet;
   const row = sheet.getLastRow() + 1;
   if (row > sheet.getMaxRows()) {
-    sheet.insertRowsAfter(sheet.getMaxRows(), 100);
+    const oldMax = sheet.getMaxRows();
+    sheet.insertRowsAfter(oldMax, 100);
+    sheet.getRange(oldMax + 1, 1, 100, table.header.length).setNumberFormat('@');
   }
   return row;
 }
 
 /**
- * 寫一整列；全部存成純文字，試算表才不會把日期、時間自動轉型
+ * 寫一整列；欄位格式在 setup 與加列時已設成純文字，試算表才不會把日期、時間自動轉型
  */
 function writeRow(table, rowNumber, raw, ev) {
   const width = table.header.length;
@@ -497,9 +511,7 @@ function writeRow(table, rowNumber, raw, ev) {
   COLUMNS.forEach(function (c) {
     out[table.col[c[0]]] = ev[c[0]] === undefined ? '' : String(ev[c[0]]);
   });
-  const range = table.sheet.getRange(rowNumber, 1, 1, width);
-  range.setNumberFormat('@');
-  range.setValues([out]);
+  table.sheet.getRange(rowNumber, 1, 1, width).setValues([out]);
 }
 
 function appendLog(log, who, text) {
@@ -569,6 +581,7 @@ function setup() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   setupEventSheet(ss);
   setupSettingSheet(ss);
+  CacheService.getScriptCache().remove(SETTINGS_CACHE_KEY);
   Logger.log('完成。秘密連結在「設定」分頁；要改名字也在那裡。');
 }
 

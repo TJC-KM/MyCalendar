@@ -86,6 +86,26 @@ test('沒帶鑰匙、鑰匙錯都擋下；hello 回名字；名字不對擋下',
   assert.strictEqual(call(gas, '', 'save', { event: base }).code, 'WHO');
 });
 
+test('設定有快取：在試算表改名要等快取過期，執行 setup 立即生效', () => {
+  const gas = freshGas();
+  assert.deepStrictEqual(call(gas, A, 'hello').members, [A, B]);
+  gas.spreadsheet.getSheetByName('設定').cells[1][1] = '阿明';
+  assert.deepStrictEqual(call(gas, A, 'hello').members, [A, B]);
+  gas.context.setup();
+  assert.deepStrictEqual(call(gas, '阿明', 'hello').members, ['阿明', B]);
+});
+
+test('活動超過工作表列數時自動加列', () => {
+  const gas = freshGas();
+  const sheet = gas.spreadsheet.getSheetByName('活動');
+  sheet.maxRows = 2;
+  assert.ok(call(gas, A, 'save', { event: base }).ok);
+  const res = call(gas, A, 'save', { event: base });
+  assert.ok(res.ok, res.error);
+  assert.strictEqual(sheet.getLastRow(), 3);
+  assert.strictEqual(sheet.getMaxRows(), 102);
+});
+
 test('設定的兩個名字一樣或叫「兩人」時報錯', () => {
   const gas = freshGas();
   const setting = gas.spreadsheet.getSheetByName('設定');

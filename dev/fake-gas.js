@@ -117,7 +117,14 @@ function formatDate(date, timeZone, pattern) {
 function createGas(options) {
   const spreadsheet = new FakeSpreadsheet();
   const logs = [];
+  const cacheStore = {};
+  const scriptCache = {
+    get: (key) => (key in cacheStore ? cacheStore[key] : null),
+    put: (key, value) => { cacheStore[key] = String(value); },
+    remove: (key) => { delete cacheStore[key]; },
+  };
   const context = {
+    CacheService: { getScriptCache: () => scriptCache },
     SpreadsheetApp: { openById: () => spreadsheet, flush: () => {} },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     ContentService: {
@@ -140,7 +147,7 @@ function createGas(options) {
     const out = context.doPost({ postData: { contents: JSON.stringify(body) } });
     return JSON.parse(out.text);
   }
-  return { context, spreadsheet, post, logs };
+  return { context, spreadsheet, post, logs, cacheStore };
 }
 
 module.exports = { createGas };

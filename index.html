@@ -279,7 +279,8 @@ textarea { resize: vertical; }
 .btn.discuss { background: var(--card); border-color: var(--discuss); color: var(--discuss); }
 .btn.danger { color: var(--discuss); }
 .btn.small { flex: 0 0 auto; min-height: 42px; font-size: 15px; font-weight: 500; }
-body.writing .sheet .btn { opacity: .55; pointer-events: none; }
+.saving { opacity: .6; }
+.saving-tag { font-size: 13px; color: var(--muted); }
 .section-title { font-size: 15px; color: var(--muted); margin: 20px 0 6px; }
 .log { display: flex; flex-direction: column; gap: 4px; font-size: 15px; }
 .log div { background: var(--bg); border-radius: 8px; padding: 6px 10px; word-break: break-word; }
@@ -386,7 +387,6 @@ const state = {
   waiting: [],
   stack: [],
   busy: 0,
-  writing: false,
   listSeq: 0,
   lastRefresh: 0,
   scrollToToday: true,
@@ -451,9 +451,14 @@ function loadStore() {
 }
 function saveStore() {
   try {
+    // 還沒存好的新活動（暫時編號 tmp-）不記，免得頁面關掉後留下假資料
+    const byId = {};
+    Object.keys(state.byId).forEach(function (id) {
+      if (id.indexOf('tmp-') !== 0) { byId[id] = state.byId[id]; }
+    });
     localStorage.setItem(STORE_KEY, JSON.stringify({
       key: state.key, me: state.me, members: state.members, wideMode: state.wideMode,
-      byId: state.byId, todo: state.todo, waiting: state.waiting,
+      byId: byId, todo: state.todo, waiting: state.waiting,
     }));
   } catch (e) {
     // 存不了就算了，下次重新輸入
@@ -738,6 +743,7 @@ function chipHtml(ev, day) {
   if (day > ev.startDate) { time = '↳'; }
   const classes = ['chip', whoClass(ev), statusClass(ev)];
   if (needsMe(ev)) { classes.push('needs'); }
+  if (isSaving(ev.id)) { classes.push('saving'); }
   return '<button class="' + classes.join(' ') + '" data-id="' + esc(ev.id) + '" title="' + esc(statusText(ev) + '｜' + ev.title) + '">'
     + '<span class="ic">' + statusIcon(ev) + '</span>'
     + (time ? '<span class="t">' + esc(time) + '</span>' : '')
@@ -747,6 +753,8 @@ function chipHtml(ev, day) {
 function cardHtml(ev, day, showDate) {
   const classes = ['card', whoClass(ev), statusClass(ev)];
   if (needsMe(ev)) { classes.push('needs'); }
+  const saving = isSaving(ev.id);
+  if (saving) { classes.push('saving'); }
   let when;
   if (showDate) {
     when = fmtWhen(ev);
@@ -762,7 +770,8 @@ function cardHtml(ev, day, showDate) {
   return '<button class="' + classes.join(' ') + '" data-id="' + esc(ev.id) + '">'
     + '<span class="card-bar"></span><span class="card-main">'
     + '<span class="card-top"><span class="pill">' + statusIcon(ev) + ' ' + esc(statusText(ev)) + '</span>'
-    + '<span class="card-when">' + esc(when) + '</span></span>'
+    + '<span class="card-when">' + esc(when) + '</span>'
+    + (saving ? '<span class="saving-tag">儲存中…</span>' : '') + '</span>'
     + '<span class="card-title">' + esc(ev.title) + '</span>'
     + '<span class="card-sub">' + esc(sub.join('　')) + '</span>'
     + '</span></button>';
@@ -925,9 +934,14 @@ function renderDetail(id) {
   } else if (ev.status === STATUS.CANCELLED) {
     buttons = '<button class="btn primary" data-act="keep" data-id="' + esc(ev.id) + '">恢復這個活動</button>';
   }
-  html += msgBox;
-  html += '<div class="btns">' + buttons
-    + '<button class="btn small" data-act="comment" data-id="' + esc(ev.id) + '">只留言</button></div>';
+  const saving = isSaving(ev.id);
+  if (saving) {
+    html += '<p class="hint">⏳ 儲存中…存好後就能再修改或回覆（不用一直等，可以先關掉這個畫面）</p>';
+  } else {
+    html += msgBox;
+    html += '<div class="btns">' + buttons
+      + '<button class="btn small" data-act="comment" data-id="' + esc(ev.id) + '">只留言</button></div>';
+  }
 
   html += '<div class="section-title">紀錄</div><div class="log">';
   String(ev.log || '').split('\n').filter(function (line) { return line.trim(); }).forEach(function (line) {
@@ -935,6 +949,7 @@ function renderDetail(id) {
   });
   html += '</div>';
 
+  if (saving) { return html; }
   html += '<div class="hr"></div><div class="btns">';
   if (!(ev.status === STATUS.DISCUSS && mine)) {
     html += '<button class="btn small" data-act="edit" data-id="' + esc(ev.id) + '">✏️ 修改</button>';
@@ -1005,26 +1020,64 @@ function renderEdit(view) {
     + '</form>';
 }
 
-/* 動作 */
-async function write(action, data, okText) {
-  if (state.writing) { return null; }
-  state.writing = true;
-  document.body.classList.add('writing');
+/* 動作：畫面先照預期改好，GAS 在背景存；存失敗就把那一筆還原 */
+const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'title', 'location', 'who'];
+const savingEvents = {};
+
+function cloneEvent(ev) { return JSON.parse(JSON.stringify(ev)); }
+function isSaving(id) { return Boolean(savingEvents[id]); }
+
+function nowStamp() {
+  const d = new Date();
+  return toStr(d) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+function addLog(ev, text) {
+  const d = new Date();
+  const line = (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' ' + state.me + ' ' + text;
+  ev.log = ev.log ? ev.log + '\n' + line : line;
+}
+
+function saveInBackground(action, data, predicted, previous) {
+  const id = predicted.id;
+  savingEvents[id] = predicted;
+  applyEvent(predicted);
   busy(1);
-  try {
-    const res = await api(action, data);
-    if ($('#msg')) { $('#msg').value = ''; }
+  api(action, data).then(function (res) {
+    delete savingEvents[id];
+    if (res.event.id !== id) {
+      // 新增的活動：把暫時的編號換成 GAS 給的
+      removeEvent(id);
+      state.stack.forEach(function (view) {
+        if (view.id === id) { view.id = res.event.id; }
+      });
+    }
     applyEvent(res.event);
-    if (okText) { toast(okText); }
-    return res.event;
-  } catch (err) {
+    renderSheet(false);
+  }).catch(function (err) {
+    delete savingEvents[id];
+    if (previous) {
+      applyEvent(previous);
+    } else {
+      removeEvent(id);
+      state.stack = state.stack.filter(function (view) { return view.id !== id; });
+      renderMain();
+    }
+    renderSheet(true);
+    if (err.code !== 'KEY' && err.code !== 'NO_KEY' && err.code !== 'WHO') {
+      err.message = '沒存成功，已還原：' + err.message;
+    }
     handleError(err);
-    return null;
-  } finally {
-    state.writing = false;
-    document.body.classList.remove('writing');
+  }).finally(function () {
     busy(-1);
-  }
+  });
+}
+
+function removeEvent(id) {
+  delete state.byId[id];
+  state.todo = state.todo.filter(function (x) { return x !== id; });
+  state.waiting = state.waiting.filter(function (x) { return x !== id; });
+  saveStore();
 }
 
 function applyEvent(ev) {
@@ -1045,51 +1098,101 @@ function messageValue() {
   return box ? box.value.trim() : '';
 }
 
-async function respond(id, status) {
+function clearMessage() {
+  if ($('#msg')) { $('#msg').value = ''; }
+}
+
+/* 動作前的共同檢查：這筆還在存就先不要動 */
+function editableEvent(id) {
   const ev = state.byId[id];
-  const message = messageValue();
+  if (!ev) { return null; }
+  if (isSaving(id)) {
+    toast('上一個動作還在儲存，請稍等一下', true);
+    return null;
+  }
+  return ev;
+}
+
+function respond(id, status) {
+  const ev = editableEvent(id);
+  if (!ev) { return; }
+  let message = messageValue();
   if (status === STATUS.DISCUSS && !message) {
     const reason = window.prompt('想怎麼調整？（可以不填）', '');
     if (reason === null) { return; }
-    $('#msg').value = reason;
+    message = reason.trim();
   }
-  const saved = await write('respond', { id: id, status: status, message: messageValue(), baseUpdatedAt: ev.updatedAt },
-    status === STATUS.CONFIRMED ? '已確認 ✓' : '已回覆再議');
-  if (saved) { renderSheet(true); }
+  const next = cloneEvent(ev);
+  next.status = status;
+  next.repliedBy = state.me;
+  next.repliedAt = nowStamp();
+  addLog(next, (status === STATUS.CONFIRMED ? '確認 ✓' : '要再議') + (message ? '：' + message : ''));
+  clearMessage();
+  saveInBackground('respond', { id: id, status: status, message: message, baseUpdatedAt: ev.updatedAt }, next, ev);
+  renderSheet(true);
+  toast(status === STATUS.CONFIRMED ? '已確認 ✓' : '已回覆再議');
 }
 
-async function keepOrRestore(id) {
-  const ev = state.byId[id];
-  const saved = await write('repropose', { id: id, message: messageValue(), baseUpdatedAt: ev.updatedAt },
-    ev.status === STATUS.CANCELLED ? '已恢復，等' + otherName() + '確認' : '已再請' + otherName() + '確認');
-  if (saved) { renderSheet(true); }
+function keepOrRestore(id) {
+  const ev = editableEvent(id);
+  if (!ev) { return; }
+  const message = messageValue();
+  const restoring = ev.status === STATUS.CANCELLED;
+  const next = cloneEvent(ev);
+  next.status = STATUS.PENDING;
+  next.proposedBy = state.me;
+  next.repliedBy = '';
+  next.repliedAt = '';
+  addLog(next, (restoring ? '恢復活動' : '維持原案，請再確認') + (message ? '：' + message : ''));
+  clearMessage();
+  saveInBackground('repropose', { id: id, message: message, baseUpdatedAt: ev.updatedAt }, next, ev);
+  renderSheet(true);
+  toast(restoring ? '已恢復，等' + otherName() + '確認' : '已再請' + otherName() + '確認');
 }
 
-async function cancelEvent(id) {
-  const ev = state.byId[id];
+function cancelEvent(id) {
+  const ev = editableEvent(id);
+  if (!ev) { return; }
   if (!window.confirm('確定要取消「' + ev.title + '」嗎？')) { return; }
-  const saved = await write('cancel', { id: id, message: messageValue(), baseUpdatedAt: ev.updatedAt }, '已取消');
-  if (saved) { renderSheet(true); }
+  const message = messageValue();
+  const next = cloneEvent(ev);
+  next.status = STATUS.CANCELLED;
+  next.proposedBy = state.me;
+  next.repliedBy = '';
+  next.repliedAt = '';
+  addLog(next, '取消活動' + (message ? '：' + message : ''));
+  clearMessage();
+  saveInBackground('cancel', { id: id, message: message, baseUpdatedAt: ev.updatedAt }, next, ev);
+  renderSheet(true);
+  toast('已取消');
 }
 
-async function comment(id) {
+function comment(id) {
   const message = messageValue();
   if (!message) {
     toast('請先在框框裡打字', true);
     $('#msg').focus();
     return;
   }
-  const saved = await write('comment', { id: id, message: message }, '已留言');
-  if (saved) {
-    $('#msg').value = '';
-    renderSheet(true);
-  }
+  const ev = editableEvent(id);
+  if (!ev) { return; }
+  const next = cloneEvent(ev);
+  addLog(next, '留言：' + message);
+  clearMessage();
+  saveInBackground('comment', { id: id, message: message }, next, ev);
+  renderSheet(true);
+  toast('已留言');
 }
 
-async function submitEdit(form) {
+function submitEdit(form) {
   const view = state.stack[state.stack.length - 1];
   const ev = view.id ? state.byId[view.id] : null;
+  if (ev && isSaving(ev.id)) {
+    toast('上一個動作還在儲存，請稍等一下', true);
+    return;
+  }
   const value = function (name) { return form.elements[name].value.trim(); };
+  const checkedWho = form.querySelector('input[name=who]:checked');
   const data = {
     id: view.id || '',
     title: value('title'),
@@ -1098,7 +1201,7 @@ async function submitEdit(form) {
     startTime: value('startTime'),
     endTime: value('endTime'),
     location: value('location'),
-    who: form.querySelector('input[name=who]:checked') ? form.querySelector('input[name=who]:checked').value : BOTH,
+    who: checkedWho ? checkedWho.value : BOTH,
     note: form.elements.note.value.trim(),
   };
   if (!data.title) { toast('請填標題', true); form.elements.title.focus(); return; }
@@ -1109,13 +1212,40 @@ async function submitEdit(form) {
     toast('結束時間不能早於開始時間', true);
     return;
   }
-  const saved = await write('save', { event: data, baseUpdatedAt: ev ? ev.updatedAt : '' }, '已儲存');
-  if (!saved) { return; }
-  if (ev) {
-    backSheet();
-  } else {
-    replaceSheet({ type: 'detail', id: saved.id });
+
+  if (!ev) {
+    const tempId = 'tmp-' + Date.now();
+    const created = Object.assign({}, data, {
+      id: tempId, status: STATUS.PENDING, proposedBy: state.me, repliedBy: '', repliedAt: '',
+      createdBy: state.me, createdAt: nowStamp(), updatedAt: '', log: '',
+    });
+    addLog(created, '新增');
+    saveInBackground('save', { event: data, baseUpdatedAt: '' }, created, null);
+    replaceSheet({ type: 'detail', id: tempId });
+    toast('已新增，等' + otherName() + '確認');
+    return;
   }
+
+  let needConfirm = false;
+  CONFIRM_FIELDS.forEach(function (key) {
+    if (ev[key] !== data[key]) { needConfirm = true; }
+  });
+  if (!needConfirm && ev.note === data.note) {
+    backSheet();
+    return;
+  }
+  const next = cloneEvent(ev);
+  Object.keys(data).forEach(function (key) { next[key] = data[key]; });
+  if (needConfirm) {
+    next.status = STATUS.PENDING;
+    next.proposedBy = state.me;
+    next.repliedBy = '';
+    next.repliedAt = '';
+  }
+  addLog(next, '修改');
+  saveInBackground('save', { event: data, baseUpdatedAt: ev.updatedAt }, next, ev);
+  backSheet();
+  toast(needConfirm ? '已修改，等' + otherName() + '重新確認' : '已修改');
 }
 
 function handleError(err) {
@@ -1157,6 +1287,8 @@ async function refresh() {
     res.events.concat(res.todo, res.waiting).forEach(function (ev) { state.byId[ev.id] = ev; });
     state.todo = res.todo.map(function (ev) { return ev.id; });
     state.waiting = res.waiting.map(function (ev) { return ev.id; });
+    // 還在背景存的那幾筆，以畫面上已經改好的為準
+    Object.keys(savingEvents).forEach(function (id) { applyEvent(savingEvents[id]); });
     state.lastRefresh = Date.now();
     saveStore();
     renderMain();
@@ -1296,6 +1428,14 @@ document.addEventListener('change', function (e) {
   if (e.target.name === 'startDate') {
     const end = e.target.form.elements.endDate;
     if (!end.value || end.value < e.target.value) { end.value = e.target.value; }
+  }
+});
+
+// 還有東西在背景存時關掉頁面，瀏覽器會先問一聲
+window.addEventListener('beforeunload', function (e) {
+  if (Object.keys(savingEvents).length > 0) {
+    e.preventDefault();
+    e.returnValue = '';
   }
 });
 
