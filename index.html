@@ -284,6 +284,33 @@ textarea { resize: vertical; }
 .btn.danger { color: var(--discuss); }
 .btn.small { flex: 0 0 auto; min-height: 42px; font-size: 15px; font-weight: 500; }
 .saving { opacity: .6; }
+
+/* 待辦 */
+.task-btn b {
+  background: var(--accent); color: #fff; border-radius: 999px;
+  padding: 0 7px; font-size: 13px; margin-left: 2px;
+}
+.task-quick { display: flex; gap: 8px; }
+.task-quick input { flex: 1; min-width: 0; }
+.task-list { display: flex; flex-direction: column; gap: 6px; }
+.task-row { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.task-check {
+  flex: none; width: 54px; border: 0; background: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.task-check .box {
+  width: 28px; height: 28px; border: 2px solid var(--muted); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 800;
+}
+.task-row.done .box { background: var(--ok); border-color: var(--ok); color: #fff; }
+.task-main {
+  flex: 1; min-width: 0; text-align: left; border: 0; background: none; cursor: pointer;
+  padding: 10px 12px 10px 0; display: flex; flex-direction: column; gap: 2px;
+}
+.task-text { font-size: 17px; word-break: break-word; }
+.task-meta { font-size: 14px; color: var(--muted); }
+.task-meta.overdue { color: var(--discuss); font-weight: 600; }
+.task-row.done .task-text { text-decoration: line-through; color: var(--muted); }
 .saving-tag { font-size: 13px; color: var(--muted); }
 .section-title { font-size: 15px; color: var(--muted); margin: 20px 0 6px; }
 .log { display: flex; flex-direction: column; gap: 4px; font-size: 15px; }
@@ -333,6 +360,7 @@ textarea { resize: vertical; }
 <header class="top">
   <div class="top-row">
     <h1>出大事行事曆</h1>
+    <button class="me-btn task-btn" data-act="tasks" id="taskBtn">☑ 待辦</button>
     <button class="me-btn" data-act="me" id="meBtn">選擇身分</button>
   </div>
   <div class="top-row">
@@ -372,6 +400,8 @@ textarea { resize: vertical; }
 const API_URL = 'https://script.google.com/macros/s/AKfycbyyBknveyfj5RJhzzNrBOxCSrssbnPPQRrCMwsKwYVSJwxqBISvbg6tpzkU2c_Gz34/exec';
 // 一週從星期幾開始：1 = 週一，0 = 週日
 const WEEK_START = 1;
+// 列表模式一次列幾天（從今天算起；這週已經過去的幾天也會列）
+const LIST_DAYS = 90;
 
 const STATUS = { PENDING: '待確認', CONFIRMED: '已確認', DISCUSS: '再議', CANCELLED: '取消' };
 const BOTH = '兩人';
@@ -388,6 +418,7 @@ const state = {
   today: '',
   byId: {},
   todo: [],
+  tasks: [],
   waiting: [],
   stack: [],
   busy: 0,
@@ -425,13 +456,21 @@ function md(s) { const d = parseDay(s); return (d.getMonth() + 1) + '/' + d.getD
 function dowOf(s) { return parseDay(s).getDay(); }
 function fmtDay(s) { return md(s) + '（' + DOW[dowOf(s)] + '）'; }
 
+/* 時段：沒有準確時間時顯示上午／下午／晚上，都沒有就是整天 */
+const PERIODS = ['上午', '下午', '晚上'];
+function periodOf(time) {
+  const hour = Number(time.slice(0, 2));
+  if (hour < 12) { return '上午'; }
+  if (hour < 18) { return '下午'; }
+  return '晚上';
+}
 function fmtTime(ev) {
-  if (!ev.startTime) { return '整天'; }
+  if (!ev.startTime) { return ev.period || '整天'; }
   return ev.endTime ? ev.startTime + '–' + ev.endTime : ev.startTime;
 }
 function fmtWhen(ev) {
   if (ev.endDate && ev.endDate !== ev.startDate) {
-    const start = fmtDay(ev.startDate) + (ev.startTime ? ' ' + ev.startTime : '');
+    const start = fmtDay(ev.startDate) + ' ' + (ev.startTime || ev.period || '');
     const end = fmtDay(ev.endDate) + (ev.endTime ? ' ' + ev.endTime : '');
     return start + ' ～ ' + end;
   }
@@ -449,6 +488,7 @@ function loadStore() {
     state.byId = saved.byId || {};
     state.todo = saved.todo || [];
     state.waiting = saved.waiting || [];
+    state.tasks = saved.tasks || [];
   } catch (e) {
     // 私密瀏覽或被擋時就不記
   }
@@ -463,6 +503,7 @@ function saveStore() {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       key: state.key, me: state.me, members: state.members, wideMode: state.wideMode,
       byId: byId, todo: state.todo, waiting: state.waiting,
+      tasks: state.tasks.filter(function (t) { return t.id.indexOf('tmp-') !== 0; }),
     }));
   } catch (e) {
     // 存不了就算了，下次重新輸入
@@ -577,6 +618,10 @@ function currentRange() {
     return { from: from, to: to, month: state.anchor.slice(0, 7) };
   }
   const start = startOfWeek(state.anchor);
+  if (mode === 'list') {
+    // 列表：這週一起往後 LIST_DAYS 天
+    return { from: start, to: addDays(state.anchor, LIST_DAYS - 1), month: '' };
+  }
   return { from: start, to: addDays(start, 20), month: '' };
 }
 function shift(direction) {
@@ -586,7 +631,7 @@ function shift(direction) {
   } else if (mode === 'week3') {
     state.anchor = addDays(state.anchor, 7 * direction);
   } else {
-    state.anchor = addDays(state.anchor, 21 * direction);
+    state.anchor = addDays(state.anchor, LIST_DAYS * direction);
   }
   window.scrollTo(0, 0);
   renderMain();
@@ -613,10 +658,18 @@ function compareEvents(a, b) {
   const ca = a.status === STATUS.CANCELLED ? 1 : 0;
   const cb = b.status === STATUS.CANCELLED ? 1 : 0;
   if (ca !== cb) { return ca - cb; }
-  const ta = a.startTime || '';
-  const tb = b.startTime || '';
+  const ta = sortTime(a);
+  const tb = sortTime(b);
   if (ta !== tb) { return ta < tb ? -1 : 1; }
   return a.title.localeCompare(b.title);
+}
+/* 排序用：整天最前面，只有時段的排在該時段開頭 */
+function sortTime(ev) {
+  if (ev.startTime) { return ev.startTime; }
+  if (ev.period === '上午') { return '06:00'; }
+  if (ev.period === '下午') { return '12:00'; }
+  if (ev.period === '晚上') { return '18:00'; }
+  return '';
 }
 
 /* 主畫面 */
@@ -627,7 +680,9 @@ function renderMain() {
   document.querySelectorAll('#modes button').forEach(function (b) {
     b.classList.toggle('on', b.dataset.mode === mode);
   });
-  $('#meBtn').textContent = state.me ? '我是' + state.me + ' ▾' : '選擇身分';
+  $('#meBtn').textContent = state.me ? state.me + ' ▾' : '選擇身分';
+  const openTasks = state.tasks.filter(function (t) { return t.done !== 'Y'; }).length;
+  $('#taskBtn').innerHTML = '☑ 待辦' + (openTasks > 0 ? ' <b>' + openTasks + '</b>' : '');
   $('#todayBtn').classList.toggle('away', state.today < range.from || state.today > range.to);
   $('#rangeLabel').textContent = rangeLabel(range);
   renderNotices();
@@ -767,7 +822,7 @@ function renderGrid(range, byDay, mode) {
 }
 
 function chipHtml(ev, day) {
-  let time = ev.startTime;
+  let time = ev.startTime || ev.period;
   if (day > ev.startDate) { time = '↳'; }
   const classes = ['chip', whoClass(ev), statusClass(ev)];
   if (needsMe(ev)) { classes.push('needs'); }
@@ -869,8 +924,10 @@ function renderSheet(force) {
     return;
   }
   // 編輯表單已經開著就不重畫，免得打到一半的字不見
-  if (!force && view.type === 'edit' && el.dataset.view === viewKey(view)) { return; }
+  const isForm = view.type === 'edit' || view.type === 'taskEdit';
+  if (!force && isForm && el.dataset.view === viewKey(view)) { return; }
   const oldMessage = $('#msg') ? $('#msg').value : '';
+  const oldTaskText = $('#taskText') ? $('#taskText').value : '';
   const sameView = el.dataset.view === viewKey(view);
   const scrollTop = el.scrollTop;
 
@@ -891,6 +948,12 @@ function renderSheet(force) {
   } else if (view.type === 'waiting') {
     title = '等' + otherName() + '確認';
     body = renderIdList(state.waiting, '沒有在等的活動');
+  } else if (view.type === 'tasks') {
+    title = '待辦';
+    body = renderTasks();
+  } else if (view.type === 'taskEdit') {
+    title = '修改待辦';
+    body = renderTaskEdit(view.id);
   }
   const back = state.stack.length > 1
     ? '<button class="icon-btn" data-act="back" aria-label="返回">‹</button>'
@@ -901,6 +964,7 @@ function renderSheet(force) {
   if (sameView) {
     el.scrollTop = scrollTop;
     if (oldMessage && $('#msg')) { $('#msg').value = oldMessage; }
+    if (oldTaskText && $('#taskText')) { $('#taskText').value = oldTaskText; }
   } else {
     el.scrollTop = 0;
   }
@@ -1019,29 +1083,43 @@ function shortTime(value) {
   return md(p[0]) + ' ' + (p[1] || '').slice(0, 5);
 }
 
+function segHtml(name, options, checked) {
+  let html = '<div class="seg">';
+  options.forEach(function (option) {
+    html += '<label><input type="radio" name="' + name + '" value="' + esc(option.value) + '"'
+      + (option.value === checked ? ' checked' : '') + '><span>' + esc(option.label) + '</span></label>';
+  });
+  return html + '</div>';
+}
+
+function whoOptions() {
+  return [BOTH].concat(state.members).map(function (name) { return { value: name, label: name }; });
+}
+
 function renderEdit(view) {
   const ev = view.id ? state.byId[view.id] : null;
-  const data = ev || { title: '', startDate: view.date, endDate: view.date, startTime: '', endTime: '', location: '', who: BOTH, note: '' };
-  const options = [BOTH].concat(state.members);
-  let seg = '';
-  options.forEach(function (name) {
-    seg += '<label><input type="radio" name="who" value="' + esc(name) + '"' + (data.who === name ? ' checked' : '') + '><span>' + esc(name) + '</span></label>';
-  });
+  const data = ev || { title: '', startDate: view.date, endDate: view.date, startTime: '', endTime: '', period: '', who: BOTH, note: '' };
+  const periodOptions = [{ value: '', label: '整天' }].concat(PERIODS.map(function (p) { return { value: p, label: p }; }));
+  const hasTime = Boolean(data.startTime);
   const hint = ev
-    ? '改了日期、時間、標題、地點、參加，要等' + otherName() + '重新確認；只改備註不用。'
+    ? '改了日期、時段、時間、標題、參加，要等' + otherName() + '重新確認；只改備註不用。'
     : '存好後會請' + otherName() + '確認。';
   return '<form id="editForm" autocomplete="off">'
     + '<label class="field"><span>標題</span><input type="text" name="title" maxlength="100" value="' + esc(data.title) + '" placeholder="例如：一起吃晚餐"></label>'
     + '<div class="row2">'
     + '<label class="field"><span>日期</span><input type="date" name="startDate" value="' + esc(data.startDate) + '"></label>'
     + '<label class="field"><span>到（多天才改）</span><input type="date" name="endDate" value="' + esc(data.endDate || data.startDate) + '"></label>'
-    + '</div><div class="row2">'
+    + '</div>'
+    + '<div class="field"><span>時段</span>' + segHtml('period', periodOptions, data.period || '') + '</div>'
+    + '<button type="button" class="link-btn" data-act="toggle-time" id="timeToggle"' + (hasTime ? ' hidden' : '') + '>⏱ 設定準確時間</button>'
+    + '<div id="timeBox"' + (hasTime ? '' : ' hidden') + '>'
+    + '<div class="row2">'
     + '<label class="field"><span>開始時間</span><input type="time" name="startTime" value="' + esc(data.startTime) + '"></label>'
     + '<label class="field"><span>結束時間</span><input type="time" name="endTime" value="' + esc(data.endTime) + '"></label>'
     + '</div>'
-    + '<button type="button" class="link-btn" data-act="clear-time">不設時間（整天）</button>'
-    + '<label class="field"><span>地點</span><input type="text" name="location" maxlength="200" value="' + esc(data.location) + '"></label>'
-    + '<div class="field"><span>誰參加</span><div class="seg">' + seg + '</div></div>'
+    + '<button type="button" class="link-btn" data-act="clear-time">不用準確時間</button>'
+    + '</div>'
+    + '<div class="field"><span>誰參加</span>' + segHtml('who', whoOptions(), data.who) + '</div>'
     + '<label class="field"><span>備註</span><textarea name="note" rows="3" maxlength="2000">' + esc(data.note) + '</textarea></label>'
     + '<p class="hint">' + esc(hint) + '</p>'
     + '<div class="btns"><button type="submit" class="btn primary">儲存</button></div>'
@@ -1049,7 +1127,7 @@ function renderEdit(view) {
 }
 
 /* 動作：畫面先照預期改好，GAS 在背景存；存失敗就把那一筆還原 */
-const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'title', 'location', 'who'];
+const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'period', 'title', 'location', 'who'];
 const savingEvents = {};
 
 function cloneEvent(ev) { return JSON.parse(JSON.stringify(ev)); }
@@ -1221,6 +1299,7 @@ function submitEdit(form) {
   }
   const value = function (name) { return form.elements[name].value.trim(); };
   const checkedWho = form.querySelector('input[name=who]:checked');
+  const checkedPeriod = form.querySelector('input[name=period]:checked');
   const data = {
     id: view.id || '',
     title: value('title'),
@@ -1228,10 +1307,13 @@ function submitEdit(form) {
     endDate: value('endDate') || value('startDate'),
     startTime: value('startTime'),
     endTime: value('endTime'),
-    location: value('location'),
+    period: checkedPeriod ? checkedPeriod.value : '',
+    // 畫面上已經沒有地點，舊資料的地點原樣保留
+    location: ev ? ev.location : '',
     who: checkedWho ? checkedWho.value : BOTH,
     note: form.elements.note.value.trim(),
   };
+  if (data.startTime) { data.period = periodOf(data.startTime); }
   if (!data.title) { toast('請填標題', true); form.elements.title.focus(); return; }
   if (!data.startDate) { toast('請選日期', true); return; }
   if (data.endDate < data.startDate) { toast('結束日期不能早於開始日期', true); return; }
@@ -1276,6 +1358,193 @@ function submitEdit(form) {
   toast(needConfirm ? '已修改，等' + otherName() + '重新確認' : '已修改');
 }
 
+/* 待辦：兩個人共用的清單，不用對方確認；一樣先改畫面、背景再存 */
+const savingTasks = {};
+
+function findTask(id) {
+  for (let i = 0; i < state.tasks.length; i++) {
+    if (state.tasks[i].id === id) { return state.tasks[i]; }
+  }
+  return null;
+}
+
+/* 換掉或拿掉一筆待辦；task 是 null 表示拿掉 */
+function putTask(id, task) {
+  state.tasks = state.tasks.filter(function (t) { return t.id !== id; });
+  if (task) { state.tasks.push(task); }
+}
+
+function saveTaskInBackground(action, data, id, predicted, previous) {
+  savingTasks[id] = predicted;
+  putTask(id, predicted);
+  saveStore();
+  renderMain();
+  renderSheet(false);
+  busy(1);
+  api(action, data).then(function (res) {
+    delete savingTasks[id];
+    if (res.task) {
+      putTask(id, null);
+      putTask(res.task.id, res.task);
+      state.stack.forEach(function (view) {
+        if (view.type === 'taskEdit' && view.id === id) { view.id = res.task.id; }
+      });
+    }
+    saveStore();
+    renderMain();
+    renderSheet(false);
+  }).catch(function (err) {
+    delete savingTasks[id];
+    putTask(id, previous);
+    saveStore();
+    renderMain();
+    renderSheet(true);
+    if (err.code !== 'KEY' && err.code !== 'NO_KEY' && err.code !== 'WHO') {
+      err.message = '沒存成功，已還原：' + err.message;
+    }
+    handleError(err);
+  }).finally(function () {
+    busy(-1);
+  });
+}
+
+function taskIsBusy(id) {
+  if (id in savingTasks) {
+    toast('這一筆還在儲存，請稍等一下', true);
+    return true;
+  }
+  return false;
+}
+
+function renderTasks() {
+  const open = state.tasks.filter(function (t) { return t.done !== 'Y'; });
+  const done = state.tasks.filter(function (t) { return t.done === 'Y'; });
+  // 有期限的照期限排、沒期限的放後面；做完的最近完成的在上面
+  open.sort(function (a, b) {
+    const da = a.dueDate || '9999-99-99';
+    const db = b.dueDate || '9999-99-99';
+    if (da !== db) { return da < db ? -1 : 1; }
+    return a.createdAt < b.createdAt ? -1 : 1;
+  });
+  done.sort(function (a, b) { return a.doneAt < b.doneAt ? 1 : -1; });
+
+  let html = '<form id="taskQuick" class="task-quick" autocomplete="off">'
+    + '<input type="text" id="taskText" name="text" maxlength="500" placeholder="新增待辦，例如：買衛生紙">'
+    + '<button type="submit" class="btn primary small">新增</button></form>';
+  html += '<div class="section-title">還沒做（' + open.length + '）</div>';
+  if (open.length > 0) {
+    html += '<div class="task-list">' + open.map(taskRowHtml).join('') + '</div>';
+  } else {
+    html += '<p class="empty-text">都做完了 👍</p>';
+  }
+  if (done.length > 0) {
+    html += '<div class="section-title">做完了（最近 30 天）</div>'
+      + '<div class="task-list">' + done.map(taskRowHtml).join('') + '</div>';
+  }
+  html += '<p class="hint">點方框打勾；點文字可以改負責的人、期限，或刪除。</p>';
+  return html;
+}
+
+function taskRowHtml(task) {
+  const done = task.done === 'Y';
+  const classes = ['task-row'];
+  if (done) { classes.push('done'); }
+  if (task.id in savingTasks) { classes.push('saving'); }
+  const meta = [task.who === BOTH ? '兩人' : task.who];
+  let overdue = false;
+  if (done) {
+    meta.push(nameOf(task.doneBy) + ' ' + shortTime(task.doneAt) + ' 做完');
+  } else if (task.dueDate) {
+    overdue = task.dueDate < state.today;
+    meta.push(dueText(task.dueDate));
+  }
+  return '<div class="' + classes.join(' ') + '">'
+    + '<button class="task-check" data-act="task-toggle" data-task="' + esc(task.id) + '" aria-label="' + (done ? '改回還沒做' : '做完了') + '">'
+    + '<span class="box">' + (done ? '✓' : '') + '</span></button>'
+    + '<button class="task-main" data-act="task-edit" data-task="' + esc(task.id) + '">'
+    + '<span class="task-text">' + esc(task.text) + '</span>'
+    + '<span class="task-meta' + (overdue ? ' overdue' : '') + '">' + esc(meta.join(' · ')) + '</span>'
+    + '</button></div>';
+}
+
+function dueText(due) {
+  if (due < state.today) { return '已過期（' + md(due) + '）'; }
+  if (due === state.today) { return '今天要做'; }
+  return fmtDay(due) + ' 前';
+}
+
+function renderTaskEdit(id) {
+  const task = findTask(id);
+  if (!task) { return '<p class="empty-text">找不到這個待辦，可能被刪掉了</p>'; }
+  return '<form id="taskForm" autocomplete="off">'
+    + '<label class="field"><span>內容</span><textarea name="text" rows="2" maxlength="500">' + esc(task.text) + '</textarea></label>'
+    + '<div class="field"><span>誰負責</span>' + segHtml('who', whoOptions(), task.who || BOTH) + '</div>'
+    + '<label class="field"><span>期限（可以不填）</span><input type="date" name="dueDate" value="' + esc(task.dueDate) + '"></label>'
+    + '<button type="button" class="link-btn" data-act="task-clear-due">不設期限</button>'
+    + '<div class="btns"><button type="submit" class="btn primary">儲存</button></div>'
+    + '<div class="hr"></div><div class="btns">'
+    + '<button type="button" class="btn small danger" data-act="task-delete" data-task="' + esc(task.id) + '">刪除這個待辦</button></div>'
+    + '</form>';
+}
+
+function addTask(form) {
+  const text = form.elements.text.value.trim();
+  if (!text) {
+    form.elements.text.focus();
+    return;
+  }
+  const tempId = 'tmp-' + Date.now();
+  const created = {
+    id: tempId, text: text, who: BOTH, dueDate: '', done: '', doneBy: '', doneAt: '',
+    createdBy: state.me, createdAt: nowStamp(), updatedAt: '',
+  };
+  form.elements.text.value = '';
+  saveTaskInBackground('taskSave', { task: { text: text, who: BOTH, dueDate: '' } }, tempId, created, null);
+  const input = $('#taskText');
+  if (input) { input.focus(); }
+}
+
+function toggleTask(id) {
+  const task = findTask(id);
+  if (!task || taskIsBusy(id)) { return; }
+  const next = JSON.parse(JSON.stringify(task));
+  const nowDone = task.done !== 'Y';
+  next.done = nowDone ? 'Y' : '';
+  next.doneBy = nowDone ? state.me : '';
+  next.doneAt = nowDone ? nowStamp() : '';
+  saveTaskInBackground('taskDone', { id: id, done: nowDone }, id, next, task);
+}
+
+function submitTask(form) {
+  const view = state.stack[state.stack.length - 1];
+  const task = findTask(view.id);
+  if (!task || taskIsBusy(task.id)) { return; }
+  const checkedWho = form.querySelector('input[name=who]:checked');
+  const data = {
+    id: task.id,
+    text: form.elements.text.value.trim(),
+    who: checkedWho ? checkedWho.value : BOTH,
+    dueDate: form.elements.dueDate.value,
+  };
+  if (!data.text) {
+    toast('內容不能空白', true);
+    return;
+  }
+  const next = Object.assign(JSON.parse(JSON.stringify(task)), data);
+  saveTaskInBackground('taskSave', { task: data }, task.id, next, task);
+  backSheet();
+  toast('已儲存');
+}
+
+function deleteTask(id) {
+  const task = findTask(id);
+  if (!task || taskIsBusy(id)) { return; }
+  if (!window.confirm('確定要刪除「' + task.text + '」嗎？刪掉就找不回來了。')) { return; }
+  saveTaskInBackground('taskDelete', { id: id }, id, null, task);
+  backSheet();
+  toast('已刪除');
+}
+
 function handleError(err) {
   if (err.code === 'KEY' || err.code === 'NO_KEY') {
     state.key = '';
@@ -1317,6 +1586,8 @@ async function refresh() {
     state.waiting = res.waiting.map(function (ev) { return ev.id; });
     // 還在背景存的那幾筆，以畫面上已經改好的為準
     Object.keys(savingEvents).forEach(function (id) { applyEvent(savingEvents[id]); });
+    state.tasks = res.tasks || [];
+    Object.keys(savingTasks).forEach(function (id) { putTask(id, savingTasks[id]); });
     state.lastRefresh = Date.now();
     saveStore();
     renderMain();
@@ -1421,6 +1692,14 @@ document.addEventListener('click', function (e) {
   if (act === 'retry-who') { startWho(); return; }
   if (act === 'pick-me') { pickMe(target.dataset.name); return; }
   if (act === 'gate-close') { $('#gate').hidden = true; return; }
+  if (act === 'tasks') { openSheet({ type: 'tasks' }); return; }
+  if (act === 'task-toggle') { toggleTask(target.dataset.task); return; }
+  if (act === 'task-edit') {
+    if (!taskIsBusy(target.dataset.task)) { openSheet({ type: 'taskEdit', id: target.dataset.task }); }
+    return;
+  }
+  if (act === 'task-delete') { deleteTask(target.dataset.task); return; }
+  if (act === 'task-clear-due') { $('#taskForm').elements.dueDate.value = ''; return; }
   if (act === 'todo') { openSheet({ type: 'todo' }); return; }
   if (act === 'waiting') { openSheet({ type: 'waiting' }); return; }
   if (act === 'close') { closeSheet(); return; }
@@ -1430,10 +1709,17 @@ document.addEventListener('click', function (e) {
     return;
   }
   if (act === 'edit') { openSheet({ type: 'edit', id: id }); return; }
+  if (act === 'toggle-time') {
+    $('#timeBox').hidden = false;
+    $('#timeToggle').hidden = true;
+    return;
+  }
   if (act === 'clear-time') {
     const form = $('#editForm');
     form.elements.startTime.value = '';
     form.elements.endTime.value = '';
+    $('#timeBox').hidden = true;
+    $('#timeToggle').hidden = false;
     return;
   }
   if (act === 'confirm') { respond(id, STATUS.CONFIRMED); return; }
@@ -1449,6 +1735,8 @@ document.addEventListener('click', function (e) {
 document.addEventListener('submit', function (e) {
   e.preventDefault();
   if (e.target.id === 'editForm') { submitEdit(e.target); }
+  if (e.target.id === 'taskQuick') { addTask(e.target); }
+  if (e.target.id === 'taskForm') { submitTask(e.target); }
 });
 
 document.addEventListener('change', function (e) {
@@ -1457,11 +1745,27 @@ document.addEventListener('change', function (e) {
     const end = e.target.form.elements.endDate;
     if (!end.value || end.value < e.target.value) { end.value = e.target.value; }
   }
+  // 填了準確時間，時段跟著選好
+  if (e.target.name === 'startTime' && e.target.value) {
+    const radio = e.target.form.querySelector('input[name=period][value="' + periodOf(e.target.value) + '"]');
+    if (radio) { radio.checked = true; }
+  }
+  // 改選跟準確時間對不上的時段，表示不要準確時間了
+  if (e.target.name === 'period') {
+    const form = e.target.form;
+    const start = form.elements.startTime.value;
+    if (start && periodOf(start) !== e.target.value) {
+      form.elements.startTime.value = '';
+      form.elements.endTime.value = '';
+      $('#timeBox').hidden = true;
+      $('#timeToggle').hidden = false;
+    }
+  }
 });
 
 // 還有東西在背景存時關掉頁面，瀏覽器會先問一聲
 window.addEventListener('beforeunload', function (e) {
-  if (Object.keys(savingEvents).length > 0) {
+  if (Object.keys(savingEvents).length > 0 || Object.keys(savingTasks).length > 0) {
     e.preventDefault();
     e.returnValue = '';
   }

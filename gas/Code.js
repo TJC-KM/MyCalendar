@@ -1,11 +1,12 @@
 /**
  * 出大事行事曆 後端（Google Apps Script）
- * 前端 index.html（GitHub Pages）用 POST 呼叫，資料存在試算表的「活動」「設定」分頁。
+ * 前端 index.html（GitHub Pages）用 POST 呼叫，資料存在試算表的「活動」「待辦」「設定」分頁。
  * 第一次使用：在編輯器執行一次 setup()（會要求授權），再部署成網頁應用程式。
  */
 
 const SPREADSHEET_ID = '1F_Y9K35er3HHPVVjgxmc6KAcQoxz3s1MH9a3EnxquyE';
 const EVENT_SHEET = '活動';
+const TASK_SHEET = '待辦';
 const SETTING_SHEET = '設定';
 const TIME_ZONE = 'Asia/Taipei';
 
@@ -26,6 +27,7 @@ const COLUMNS = [
   ['endDate', '結束日期'],
   ['startTime', '開始時間'],
   ['endTime', '結束時間'],
+  ['period', '時段'],
   ['title', '標題'],
   ['location', '地點'],
   ['who', '參加'],
@@ -41,7 +43,27 @@ const COLUMNS = [
 ];
 
 /** 改了這些欄位，要另一個人重新確認；只改備註不用 */
-const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'title', 'location', 'who'];
+const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'period', 'title', 'location', 'who'];
+
+/** 「時段」可以填的值；空白＝整天。有填開始時間時，時段依開始時間自動決定 */
+const PERIODS = ['上午', '下午', '晚上'];
+
+/** 「待辦」分頁的欄位；完成填 Y */
+const TASK_COLUMNS = [
+  ['id', 'ID'],
+  ['text', '內容'],
+  ['who', '負責'],
+  ['dueDate', '期限'],
+  ['done', '完成'],
+  ['doneBy', '完成人'],
+  ['doneAt', '完成時間'],
+  ['createdBy', '建立人'],
+  ['createdAt', '建立時間'],
+  ['updatedAt', '修改時間'],
+];
+
+/** 已完成的待辦，回傳最近幾天內完成的就好 */
+const TASK_DONE_KEEP_DAYS = 30;
 
 /** GitHub Pages 的網址，setup 用它組出秘密連結 */
 const PAGE_URL = 'https://tjc-km.github.io/MyCalendar/';
@@ -98,6 +120,11 @@ function handleRequest(req) {
   lock.waitLock(15000);
   try {
     // 拿到鎖之後才讀，才不會蓋掉對方剛存的資料
+    if (String(req.action).indexOf('task') === 0) {
+      const result = handleTask(ss, settings, who, req);
+      SpreadsheetApp.flush();
+      return result;
+    }
     const table = readEvents(ss);
     let event;
     if (req.action === 'save') {
@@ -151,7 +178,10 @@ function listEvents(ss, settings, who, req) {
       waiting.push(ev);
     }
   });
-  return { ok: true, members: settings.members, today: today, events: events, todo: todo, waiting: waiting };
+  return {
+    ok: true, members: settings.members, today: today,
+    events: events, todo: todo, waiting: waiting, tasks: listTasks(ss),
+  };
 }
 
 /**
@@ -179,6 +209,7 @@ function saveEvent(table, settings, who, req) {
       endDate: input.endDate,
       startTime: input.startTime,
       endTime: input.endTime,
+      period: input.period,
       title: input.title,
       location: input.location,
       who: input.who,
@@ -326,10 +357,17 @@ function cleanInput(source, settings) {
     endDate: normalizeDate(source.endDate),
     startTime: normalizeTime(source.startTime),
     endTime: normalizeTime(source.endTime),
+    period: cleanText(source.period, 10),
     location: cleanText(source.location, 200),
     who: cleanText(source.who, 50) || BOTH,
     note: cleanText(source.note, 2000),
   };
+  if (input.startTime) {
+    input.period = periodOf(input.startTime);
+  }
+  if (input.period && PERIODS.indexOf(input.period) < 0) {
+    fail('時段只能選整天、上午、下午、晚上');
+  }
   if (!input.title) {
     fail('請填標題');
   }
@@ -362,7 +400,7 @@ function describeChanges(ev, input) {
   if (ev.startDate !== input.startDate || ev.endDate !== input.endDate) {
     changes.push('日期 ' + formatDateRange(ev) + '→' + formatDateRange(input));
   }
-  if (ev.startTime !== input.startTime || ev.endTime !== input.endTime) {
+  if (ev.startTime !== input.startTime || ev.endTime !== input.endTime || ev.period !== input.period) {
     changes.push('時間 ' + formatTimeRange(ev) + '→' + formatTimeRange(input));
   }
   if (ev.title !== input.title) {
@@ -390,12 +428,26 @@ function formatDateRange(ev) {
 
 function formatTimeRange(ev) {
   if (!ev.startTime) {
-    return '整天';
+    return ev.period || '整天';
   }
   if (ev.endTime) {
     return ev.startTime + '-' + ev.endTime;
   }
   return ev.startTime;
+}
+
+/**
+ * 依開始時間決定時段：中午 12 點前上午、傍晚 6 點前下午，之後晚上
+ */
+function periodOf(time) {
+  const hour = Number(String(time).slice(0, 2));
+  if (hour < 12) {
+    return '上午';
+  }
+  if (hour < 18) {
+    return '下午';
+  }
+  return '晚上';
 }
 
 function shortDate(dateString) {
@@ -429,23 +481,28 @@ function readSettings() {
 }
 
 /**
- * 讀「活動」分頁；回傳每列的列號、原始值（寫回時保留不認得的欄位）、整理過的資料
+ * 讀一個資料分頁；回傳每列的列號、原始值（寫回時保留不認得的欄位）、依欄位名稱整理的資料。
+ * 分頁或欄位不見了（例如程式加了新欄位），會先自動補上再讀，不用手動執行 setup
  */
-function readEvents(ss) {
-  const sheet = ss.getSheetByName(EVENT_SHEET);
+function readTable(ss, sheetName, columns, repaired) {
+  const sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
-    fail('試算表沒有「活動」分頁：請在 GAS 編輯器執行一次 setup');
+    return repairTable(ss, sheetName, columns, repaired, '試算表沒有「' + sheetName + '」分頁');
   }
   const values = sheet.getDataRange().getDisplayValues();
   const header = values[0].map(function (h) { return String(h).trim(); });
   const col = {};
-  COLUMNS.forEach(function (c) {
+  let missing = '';
+  columns.forEach(function (c) {
     const index = header.indexOf(c[1]);
-    if (index < 0) {
-      fail('「活動」分頁少了欄位「' + c[1] + '」：請在 GAS 編輯器執行一次 setup');
+    if (index < 0 && !missing) {
+      missing = c[1];
     }
     col[c[0]] = index;
   });
+  if (missing) {
+    return repairTable(ss, sheetName, columns, repaired, '「' + sheetName + '」分頁少了欄位「' + missing + '」');
+  }
 
   const items = [];
   for (let r = 1; r < values.length; r++) {
@@ -453,20 +510,52 @@ function readEvents(ss) {
     if (!String(raw[col.id]).trim()) {
       continue;
     }
-    const ev = {};
-    COLUMNS.forEach(function (c) {
-      ev[c[0]] = String(raw[col[c[0]]]).trim();
+    const data = {};
+    columns.forEach(function (c) {
+      data[c[0]] = String(raw[col[c[0]]]).trim();
     });
+    items.push({ row: r + 1, raw: raw, data: data });
+  }
+  return { sheet: sheet, header: header, col: col, columns: columns, items: items };
+}
+
+/**
+ * 用 setup 的同一套做法補分頁或欄位，再讀一次；補過還是不對才報錯
+ */
+function repairTable(ss, sheetName, columns, repaired, problem) {
+  if (repaired) {
+    fail(problem + '，自動補不上：請在 GAS 編輯器執行一次 setup');
+  }
+  if (sheetName === EVENT_SHEET) {
+    setupEventSheet(ss);
+  } else if (sheetName === TASK_SHEET) {
+    setupTaskSheet(ss);
+  }
+  SpreadsheetApp.flush();
+  return readTable(ss, sheetName, columns, true);
+}
+
+/**
+ * 讀「活動」分頁，日期時間統一格式、狀態空白當待確認
+ */
+function readEvents(ss) {
+  const table = readTable(ss, EVENT_SHEET, COLUMNS);
+  table.items.forEach(function (item) {
+    const ev = item.data;
     ev.startDate = normalizeDate(ev.startDate);
     ev.endDate = normalizeDate(ev.endDate) || ev.startDate;
     ev.startTime = normalizeTime(ev.startTime);
     ev.endTime = normalizeTime(ev.endTime);
+    if (ev.startTime) {
+      ev.period = periodOf(ev.startTime);
+    } else if (PERIODS.indexOf(ev.period) < 0) {
+      ev.period = '';
+    }
     if (!ev.status) {
       ev.status = STATUS.PENDING;
     }
-    items.push({ row: r + 1, raw: raw, data: ev });
-  }
-  return { sheet: sheet, header: header, col: col, items: items };
+  });
+  return table;
 }
 
 function findItem(table, id) {
@@ -476,7 +565,8 @@ function findItem(table, id) {
       return table.items[i];
     }
   }
-  fail('找不到這個活動，可能被刪掉了，請重新整理', 'STALE');
+  const what = table.columns === TASK_COLUMNS ? '待辦' : '活動';
+  fail('找不到這個' + what + '，可能被刪掉了，請重新整理', 'STALE');
 }
 
 /**
@@ -508,10 +598,103 @@ function writeRow(table, rowNumber, raw, ev) {
   for (let i = 0; i < width; i++) {
     out.push(raw && i < raw.length ? raw[i] : '');
   }
-  COLUMNS.forEach(function (c) {
+  table.columns.forEach(function (c) {
     out[table.col[c[0]]] = ev[c[0]] === undefined ? '' : String(ev[c[0]]);
   });
   table.sheet.getRange(rowNumber, 1, 1, width).setValues([out]);
+}
+
+/**
+ * 待辦：新增／修改（taskSave）、打勾或取消打勾（taskDone）、刪除（taskDelete）
+ */
+function handleTask(ss, settings, who, req) {
+  const table = readTable(ss, TASK_SHEET, TASK_COLUMNS);
+  if (req.action === 'taskSave') {
+    return { ok: true, task: saveTask(table, settings, who, req.task || {}) };
+  }
+  if (req.action === 'taskDone') {
+    return { ok: true, task: doneTask(table, who, req) };
+  }
+  if (req.action === 'taskDelete') {
+    const item = findItem(table, req.id);
+    table.sheet.deleteRow(item.row);
+    return { ok: true, id: item.data.id };
+  }
+  fail('不認得的動作：' + req.action);
+}
+
+/**
+ * 沒完成的全部回傳；完成的只回傳最近 TASK_DONE_KEEP_DAYS 天內的
+ */
+function listTasks(ss) {
+  const table = readTable(ss, TASK_SHEET, TASK_COLUMNS);
+  const since = Utilities.formatDate(new Date(Date.now() - TASK_DONE_KEEP_DAYS * 86400000), TIME_ZONE, 'yyyy-MM-dd');
+  const tasks = [];
+  table.items.forEach(function (item) {
+    const task = item.data;
+    task.dueDate = normalizeDate(task.dueDate);
+    if (task.done !== 'Y' || task.doneAt.slice(0, 10) >= since) {
+      tasks.push(task);
+    }
+  });
+  return tasks;
+}
+
+function saveTask(table, settings, who, source) {
+  const input = {
+    text: cleanText(source.text, 500),
+    who: cleanText(source.who, 50) || BOTH,
+    dueDate: normalizeDate(source.dueDate),
+  };
+  if (!input.text) {
+    fail('待辦內容是空的');
+  }
+  if (input.who !== BOTH && settings.members.indexOf(input.who) < 0) {
+    fail('「負責」要選兩人或其中一位');
+  }
+  const now = nowString();
+  if (!source.id) {
+    const created = {
+      id: Utilities.getUuid().replace(/-/g, '').slice(0, 12),
+      text: input.text,
+      who: input.who,
+      dueDate: input.dueDate,
+      done: '',
+      doneBy: '',
+      doneAt: '',
+      createdBy: who,
+      createdAt: now,
+      updatedAt: now,
+    };
+    writeRow(table, nextEmptyRow(table), null, created);
+    return created;
+  }
+  const item = findItem(table, source.id);
+  const task = item.data;
+  task.text = input.text;
+  task.who = input.who;
+  task.dueDate = input.dueDate;
+  task.updatedAt = now;
+  writeRow(table, item.row, item.raw, task);
+  return task;
+}
+
+function doneTask(table, who, req) {
+  const item = findItem(table, req.id);
+  const task = item.data;
+  const now = nowString();
+  if (req.done) {
+    task.done = 'Y';
+    task.doneBy = who;
+    task.doneAt = now;
+  } else {
+    task.done = '';
+    task.doneBy = '';
+    task.doneAt = '';
+  }
+  task.updatedAt = now;
+  writeRow(table, item.row, item.raw, task);
+  return task;
 }
 
 function appendLog(log, who, text) {
@@ -575,11 +758,12 @@ function fail(message, code) {
 }
 
 /**
- * 建立或補齊「活動」「設定」分頁。可以重複執行，不會動到已經有的資料
+ * 建立或補齊「活動」「待辦」「設定」分頁。可以重複執行，不會動到已經有的資料
  */
 function setup() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   setupEventSheet(ss);
+  setupTaskSheet(ss);
   setupSettingSheet(ss);
   CacheService.getScriptCache().remove(SETTINGS_CACHE_KEY);
   Logger.log('完成。秘密連結在「設定」分頁；要改名字也在那裡。');
@@ -596,8 +780,24 @@ function setupEventSheet(ss) {
       sheet = ss.insertSheet(EVENT_SHEET, 0);
     }
   }
+  const wide = { '標題': 160, '地點': 120, '備註': 200, '留言紀錄': 320, '建立時間': 140, '修改時間': 140, '回覆時間': 140 };
+  setupHeader(sheet, COLUMNS, wide);
+}
 
-  const labels = COLUMNS.map(function (c) { return c[1]; });
+function setupTaskSheet(ss) {
+  let sheet = ss.getSheetByName(TASK_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(TASK_SHEET, 1);
+  }
+  const wide = { '內容': 260, '完成時間': 140, '建立時間': 140, '修改時間': 140 };
+  setupHeader(sheet, TASK_COLUMNS, wide);
+}
+
+/**
+ * 空的分頁寫入全部表頭；已有資料的只在後面補缺的欄位。整頁設成純文字
+ */
+function setupHeader(sheet, columns, wide) {
+  const labels = columns.map(function (c) { return c[1]; });
   if (sheet.getLastRow() <= 1) {
     const oldWidth = Math.max(sheet.getLastColumn(), 1);
     sheet.getRange(1, 1, sheet.getMaxRows(), oldWidth).clearContent().clearDataValidations();
@@ -616,7 +816,6 @@ function setupEventSheet(ss) {
   sheet.setFrozenRows(1);
   sheet.setColumnWidths(1, width, 90);
   const header = sheet.getRange(1, 1, 1, width).getDisplayValues()[0];
-  const wide = { '標題': 160, '地點': 120, '備註': 200, '留言紀錄': 320, '建立時間': 140, '修改時間': 140, '回覆時間': 140 };
   Object.keys(wide).forEach(function (label) {
     const index = header.indexOf(label);
     if (index >= 0) {

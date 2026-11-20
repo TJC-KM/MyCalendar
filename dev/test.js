@@ -37,10 +37,107 @@ test('setup 把舊的工作表1 改成活動、表頭換新', () => {
   assert.ok(sheet);
   assert.strictEqual(gas.spreadsheet.getSheetByName('工作表1'), null);
   assert.strictEqual(sheet.cells[0][0], 'ID');
-  assert.strictEqual(sheet.cells[0].length, 17);
+  assert.strictEqual(sheet.cells[0].length, 18);
+  assert.ok(sheet.cells[0].includes('時段'));
   assert.ok(!sheet.cells[0].includes('confirmed'));
   const setting = gas.spreadsheet.getSheetByName('設定');
   assert.deepStrictEqual(setting.cells.map((r) => r[0]), ['項目', '成員1', '成員2', '鑰匙', '秘密連結']);
+  assert.deepStrictEqual(gas.spreadsheet.getSheetByName('待辦').cells[0].slice(0, 3), ['ID', '內容', '負責']);
+});
+
+test('舊的活動分頁（沒有時段欄）跑 setup 會在最後補上，原有資料不動', () => {
+  const gas = createGas();
+  gas.context.setup();
+  const sheet = gas.spreadsheet.getSheetByName('活動');
+  const oldHeader = sheet.cells[0].filter((h) => h !== '時段');
+  const row = oldHeader.map(() => '');
+  row[oldHeader.indexOf('ID')] = 'old1';
+  row[oldHeader.indexOf('開始日期')] = '2030-01-05';
+  row[oldHeader.indexOf('開始時間')] = '19:00';
+  row[oldHeader.indexOf('標題')] = '舊資料';
+  sheet.cells = [oldHeader, row];
+  gas.context.setup();
+  assert.strictEqual(sheet.cells[0][sheet.cells[0].length - 1], '時段');
+  assert.strictEqual(sheet.cells[1][oldHeader.indexOf('標題')], '舊資料');
+  gas.key = settingValue(gas, '鑰匙');
+  const ev = call(gas, A, 'list', { from: '2030-01-01', to: '2030-01-31' }).events[0];
+  assert.strictEqual(ev.period, '晚上');
+});
+
+test('沒跑 setup 也能用：讀資料時自動補「時段」欄和「待辦」分頁', () => {
+  const gas = freshGas();
+  const sheet = gas.spreadsheet.getSheetByName('活動');
+  const oldHeader = sheet.cells[0].filter((h) => h !== '時段');
+  const row = oldHeader.map(() => '');
+  row[oldHeader.indexOf('ID')] = 'old1';
+  row[oldHeader.indexOf('開始日期')] = '2030-01-05';
+  row[oldHeader.indexOf('標題')] = '舊資料';
+  sheet.cells = [oldHeader, row];
+  gas.spreadsheet.sheets = gas.spreadsheet.sheets.filter((s) => s.name !== '待辦');
+  const res = call(gas, A, 'list', { from: '2030-01-01', to: '2030-01-31' });
+  assert.ok(res.ok, res.error);
+  assert.strictEqual(res.events[0].title, '舊資料');
+  assert.deepStrictEqual(res.tasks, []);
+  assert.ok(sheet.cells[0].includes('時段'));
+  assert.ok(gas.spreadsheet.getSheetByName('待辦'));
+  assert.ok(call(gas, A, 'taskSave', { task: { text: '第一件' } }).ok);
+});
+
+test('時段：只選時段不填時間；有開始時間就依時間決定時段', () => {
+  const gas = freshGas();
+  const morning = call(gas, A, 'save', { event: Object.assign({}, base, { startTime: '', endTime: '', period: '上午' }) }).event;
+  assert.strictEqual(morning.period, '上午');
+  assert.strictEqual(morning.startTime, '');
+  const wrong = call(gas, A, 'save', { event: Object.assign({}, base, { startTime: '14:00', endTime: '', period: '晚上' }) }).event;
+  assert.strictEqual(wrong.period, '下午');
+  assert.strictEqual(call(gas, A, 'save', { event: Object.assign({}, base, { startTime: '', endTime: '', period: '半夜' }) }).ok, false);
+  const allDay = call(gas, A, 'save', { event: Object.assign({}, base, { startTime: '', endTime: '', period: '' }) }).event;
+  assert.strictEqual(allDay.period, '');
+});
+
+test('時段改了算改內容：要對方重新確認，紀錄寫時間', () => {
+  const gas = freshGas();
+  let ev = call(gas, A, 'save', { event: Object.assign({}, base, { startTime: '', endTime: '', period: '上午' }) }).event;
+  ev = call(gas, B, 'respond', { id: ev.id, status: '已確認', baseUpdatedAt: ev.updatedAt }).event;
+  ev = call(gas, B, 'save', { event: Object.assign({}, ev, { period: '晚上' }), baseUpdatedAt: ev.updatedAt }).event;
+  assert.strictEqual(ev.status, '待確認');
+  assert.strictEqual(ev.proposedBy, B);
+  assert.match(ev.log, /時間 上午→晚上$/);
+});
+
+test('待辦：新增、清單、打勾、取消打勾、修改、刪除', () => {
+  const gas = freshGas();
+  const created = call(gas, A, 'taskSave', { task: { text: '買衛生紙', who: B, dueDate: '2030/1/9' } });
+  assert.ok(created.ok, created.error);
+  assert.strictEqual(created.task.dueDate, '2030-01-09');
+  assert.strictEqual(created.task.createdBy, A);
+  let list = call(gas, B, 'list', { from: '2030-01-01', to: '2030-01-31' }).tasks;
+  assert.strictEqual(list.length, 1);
+  const done = call(gas, B, 'taskDone', { id: created.task.id, done: true }).task;
+  assert.strictEqual(done.done, 'Y');
+  assert.strictEqual(done.doneBy, B);
+  const undone = call(gas, A, 'taskDone', { id: created.task.id, done: false }).task;
+  assert.strictEqual(undone.done, '');
+  assert.strictEqual(undone.doneBy, '');
+  const edited = call(gas, A, 'taskSave', { task: { id: created.task.id, text: '買衛生紙兩串', who: '兩人', dueDate: '' } }).task;
+  assert.strictEqual(edited.text, '買衛生紙兩串');
+  assert.strictEqual(edited.dueDate, '');
+  call(gas, A, 'taskSave', { task: { text: '第二件' } });
+  assert.strictEqual(call(gas, A, 'taskDelete', { id: created.task.id }).ok, true);
+  list = call(gas, A, 'list', { from: '2030-01-01', to: '2030-01-31' }).tasks;
+  assert.deepStrictEqual(list.map((t) => t.text), ['第二件']);
+  assert.strictEqual(call(gas, A, 'taskDone', { id: created.task.id, done: true }).code, 'STALE');
+});
+
+test('待辦：內容空白、負責亂填擋下；完成超過 30 天不回傳', () => {
+  const gas = freshGas();
+  assert.strictEqual(call(gas, A, 'taskSave', { task: { text: '  ' } }).ok, false);
+  assert.strictEqual(call(gas, A, 'taskSave', { task: { text: 'x', who: '隔壁' } }).ok, false);
+  const task = call(gas, A, 'taskSave', { task: { text: '舊的' } }).task;
+  call(gas, A, 'taskDone', { id: task.id, done: true });
+  const sheet = gas.spreadsheet.getSheetByName('待辦');
+  sheet.cells[1][sheet.cells[0].indexOf('完成時間')] = '2000-01-01 10:00:00';
+  assert.strictEqual(call(gas, A, 'list', { from: '2030-01-01', to: '2030-01-31' }).tasks.length, 0);
 });
 
 test('setup 產生 32 碼鑰匙與秘密連結', () => {
@@ -263,9 +360,9 @@ test('使用者自己加的欄位，存檔時不會被清掉', () => {
   const sheet = gas.spreadsheet.getSheetByName('活動');
   sheet.cells[0].push('我的欄位');
   const ev = call(gas, A, 'save', { event: base }).event;
-  sheet.cells[1][17] = '保留我';
+  sheet.cells[1][sheet.cells[0].indexOf('我的欄位')] = '保留我';
   call(gas, B, 'respond', { id: ev.id, status: '已確認', baseUpdatedAt: ev.updatedAt });
-  assert.strictEqual(sheet.cells[1][17], '保留我');
+  assert.strictEqual(sheet.cells[1][sheet.cells[0].indexOf('我的欄位')], '保留我');
 });
 
 console.log('\n全部通過：' + passed + ' 項');

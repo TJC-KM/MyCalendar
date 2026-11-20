@@ -35,6 +35,18 @@ call(B, 'save', { event: { title: '瑜珈課', startDate: dayFromToday(3), start
 ev = call(A, 'save', { event: { title: '看電影', startDate: dayFromToday(-2), startTime: '20:00', who: '兩人' } });
 call(B, 'cancel', { id: ev.id, message: '太累了', baseUpdatedAt: ev.updatedAt });
 call(B, 'save', { event: { title: '牙醫', startDate: dayFromToday(12), startTime: '15:00', who: B } });
+call(A, 'save', { event: { title: '大掃除', startDate: dayFromToday(4), period: '上午', who: '兩人' } });
+call(B, 'save', { event: { title: '出國', startDate: dayFromToday(60), endDate: dayFromToday(64), who: '兩人' } });
+function task(who, data) {
+  const res = gas.post(Object.assign({ action: 'taskSave', who, key }, { task: data }));
+  if (!res.ok) throw new Error(res.error);
+  return res.task;
+}
+task(B, { text: '買衛生紙', who: A, dueDate: dayFromToday(1) });
+task(A, { text: '繳電費', who: '兩人', dueDate: dayFromToday(-1) });
+task(A, { text: '整理冬天的衣服', who: B });
+const doneTask = task(B, { text: '訂餐廳', who: A });
+gas.post({ action: 'taskDone', who: A, key, id: doneTask.id, done: true });
 
 http.createServer((req, res) => {
   if (req.method === 'POST' && req.url.startsWith('/exec')) {

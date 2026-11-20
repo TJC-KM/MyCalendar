@@ -41,6 +41,11 @@ class FakeSheet {
     this.getRange(row, 1, 1, values.length).setValues([values]);
     return this;
   }
+  deleteRow(row) {
+    this.cells.splice(row - 1, 1);
+    this.maxRows -= 1;
+    return this;
+  }
   setFrozenRows() { return this; }
   setColumnWidth() { return this; }
   setColumnWidths() { return this; }
