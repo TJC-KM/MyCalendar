@@ -43,10 +43,14 @@ const COLUMNS = [
 /** 改了這些欄位，要另一個人重新確認；只改備註不用 */
 const CONFIRM_FIELDS = ['startDate', 'endDate', 'startTime', 'endTime', 'title', 'location', 'who'];
 
+/** GitHub Pages 的網址，setup 用它組出秘密連結 */
+const PAGE_URL = 'https://tjc-km.github.io/MyCalendar/';
+
 const SETTING_ROWS = [
-  ['通關密語', '', '打開網頁要輸入，兩個人用同一組。沒填的話網頁不能用；改了以後兩支手機都要重新輸入'],
   ['成員1', '老公', '顯示在網頁上的名字。改名後，舊活動的建立人、提出人不會跟著改'],
   ['成員2', '老婆', '同上'],
+  ['鑰匙', '', '執行 setup 時自動產生，沒有它網頁不能用。要換一組：清空這格再執行 setup，舊連結就失效，兩支手機都要點新連結'],
+  ['秘密連結', '', '把這個網址傳給要用的人，手機點一次就會記住。執行 setup 會自動更新'],
 ];
 
 function doGet() {
@@ -68,11 +72,11 @@ function doPost(e) {
 function handleRequest(req) {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const settings = readSettings(ss);
-  if (!settings.passcode) {
-    fail('還沒設定通關密語：請到試算表的「設定」分頁填寫', 'NO_PASSCODE');
+  if (!settings.key) {
+    fail('還沒有鑰匙：請在 GAS 編輯器執行一次 setup', 'NO_KEY');
   }
-  if (String(req.passcode || '').trim() !== settings.passcode) {
-    fail('通關密語不對', 'PASSCODE');
+  if (String(req.key || '').trim() !== settings.key) {
+    fail('連結不對，或鑰匙已經換了：請用試算表「設定」分頁的秘密連結重新打開', 'KEY');
   }
   if (req.action === 'hello') {
     return { ok: true, members: settings.members };
@@ -409,7 +413,7 @@ function readSettings(ss) {
   if (!members[0] || !members[1] || members[0] === members[1] || members.indexOf(BOTH) >= 0) {
     fail('「設定」分頁的成員1、成員2 要填兩個不同的名字，也不能叫「' + BOTH + '」');
   }
-  return { passcode: map['通關密語'] || '', members: members };
+  return { members: members, key: map['鑰匙'] || '' };
 }
 
 /**
@@ -565,7 +569,7 @@ function setup() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   setupEventSheet(ss);
   setupSettingSheet(ss);
-  Logger.log('完成。記得到「設定」分頁填通關密語。');
+  Logger.log('完成。秘密連結在「設定」分頁；要改名字也在那裡。');
 }
 
 function setupEventSheet(ss) {
@@ -623,6 +627,26 @@ function setupSettingSheet(ss) {
       sheet.appendRow(row);
     }
   });
+
+  // 鑰匙是空的才產生新的；秘密連結每次都照目前的鑰匙重寫
+  const values = sheet.getDataRange().getDisplayValues();
+  let keyRow = 0;
+  let linkRow = 0;
+  values.forEach(function (row, index) {
+    const name = String(row[0]).trim();
+    if (name === '鑰匙') {
+      keyRow = index + 1;
+    }
+    if (name === '秘密連結') {
+      linkRow = index + 1;
+    }
+  });
+  let key = String(values[keyRow - 1][1]).trim();
+  if (!key) {
+    key = Utilities.getUuid().replace(/-/g, '');
+    sheet.getRange(keyRow, 2, 1, 1).setValues([[key]]);
+  }
+  sheet.getRange(linkRow, 2, 1, 1).setValues([[PAGE_URL + '#k=' + key]]);
   sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#eef2ff');
   sheet.setFrozenRows(1);
   sheet.setColumnWidth(1, 100);

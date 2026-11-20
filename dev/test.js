@@ -9,16 +9,20 @@ function test(name, fn) {
   console.log('ok  ' + name);
 }
 
+function settingValue(gas, name) {
+  const row = gas.spreadsheet.getSheetByName('設定').cells.find((r) => r[0] === name);
+  return row ? row[1] : undefined;
+}
+
 function freshGas() {
   const gas = createGas();
   gas.context.setup();
-  const setting = gas.spreadsheet.getSheetByName('設定');
-  setting.cells[1][1] = 'test-pass';
+  gas.key = settingValue(gas, '鑰匙');
   return gas;
 }
 
 function call(gas, who, action, data) {
-  return gas.post(Object.assign({ action, passcode: 'test-pass', who }, data || {}));
+  return gas.post(Object.assign({ action, who, key: gas.key }, data || {}));
 }
 
 const A = '老公';
@@ -36,27 +40,59 @@ test('setup 把舊的工作表1 改成活動、表頭換新', () => {
   assert.strictEqual(sheet.cells[0].length, 17);
   assert.ok(!sheet.cells[0].includes('confirmed'));
   const setting = gas.spreadsheet.getSheetByName('設定');
-  assert.deepStrictEqual(setting.cells.map((r) => r[0]), ['項目', '通關密語', '成員1', '成員2']);
+  assert.deepStrictEqual(setting.cells.map((r) => r[0]), ['項目', '成員1', '成員2', '鑰匙', '秘密連結']);
 });
 
-test('setup 重複執行不會重複加設定列、不會清掉資料', () => {
+test('setup 產生 32 碼鑰匙與秘密連結', () => {
   const gas = freshGas();
-  call(gas, A, 'save', { event: base });
+  assert.match(gas.key, /^[0-9a-f]{32}$/);
+  assert.strictEqual(settingValue(gas, '秘密連結'), 'https://tjc-km.github.io/MyCalendar/#k=' + gas.key);
+});
+
+test('setup 重複執行：不重複加設定列、不換鑰匙、不清資料', () => {
+  const gas = freshGas();
+  gas.spreadsheet.getSheetByName('設定').cells[1][1] = '阿明';
+  call(gas, '阿明', 'save', { event: base });
   gas.context.setup();
-  assert.strictEqual(gas.spreadsheet.getSheetByName('設定').getLastRow(), 4);
-  assert.strictEqual(gas.spreadsheet.getSheetByName('設定').cells[1][1], 'test-pass');
+  assert.strictEqual(gas.spreadsheet.getSheetByName('設定').getLastRow(), 5);
+  assert.strictEqual(settingValue(gas, '成員1'), '阿明');
+  assert.strictEqual(settingValue(gas, '鑰匙'), gas.key);
   assert.strictEqual(gas.spreadsheet.getSheetByName('活動').getLastRow(), 2);
 });
 
-test('沒填通關密語、密碼錯、名字錯都擋下', () => {
-  const gas = createGas();
+test('鑰匙清空再 setup 會換新的，舊連結失效', () => {
+  const gas = freshGas();
+  const oldKey = gas.key;
+  const setting = gas.spreadsheet.getSheetByName('設定');
+  setting.cells.find((r) => r[0] === '鑰匙')[1] = '';
+  assert.strictEqual(call(gas, A, 'hello').code, 'NO_KEY');
   gas.context.setup();
-  assert.strictEqual(gas.post({ action: 'hello', passcode: '' }).code, 'NO_PASSCODE');
-  gas.spreadsheet.getSheetByName('設定').cells[1][1] = 'test-pass';
-  assert.strictEqual(gas.post({ action: 'hello', passcode: 'wrong' }).code, 'PASSCODE');
-  const hello = gas.post({ action: 'hello', passcode: 'test-pass' });
+  gas.key = settingValue(gas, '鑰匙');
+  assert.notStrictEqual(gas.key, oldKey);
+  assert.ok(settingValue(gas, '秘密連結').endsWith(gas.key));
+  assert.strictEqual(gas.post({ action: 'hello', key: oldKey }).code, 'KEY');
+});
+
+test('沒帶鑰匙、鑰匙錯都擋下；hello 回名字；名字不對擋下', () => {
+  const gas = freshGas();
+  assert.strictEqual(gas.post({ action: 'hello' }).code, 'KEY');
+  assert.strictEqual(gas.post({ action: 'list', who: A, key: 'wrong', from: '2030-01-01', to: '2030-01-31' }).code, 'KEY');
+  const hello = gas.post({ action: 'hello', key: gas.key });
+  assert.ok(hello.ok, hello.error);
   assert.deepStrictEqual(hello.members, [A, B]);
+  assert.strictEqual(hello.key, undefined);
+  assert.strictEqual(call(gas, A, 'list', { from: '2030-01-01', to: '2030-01-31' }).ok, true);
   assert.strictEqual(call(gas, '路人', 'list', { from: '2030-01-01', to: '2030-01-31' }).code, 'WHO');
+  assert.strictEqual(call(gas, '', 'save', { event: base }).code, 'WHO');
+});
+
+test('設定的兩個名字一樣或叫「兩人」時報錯', () => {
+  const gas = freshGas();
+  const setting = gas.spreadsheet.getSheetByName('設定');
+  setting.cells[2][1] = A;
+  assert.strictEqual(call(gas, A, 'hello').ok, false);
+  setting.cells[2][1] = '兩人';
+  assert.strictEqual(call(gas, A, 'hello').ok, false);
 });
 
 test('新增：待確認、提出人是自己、留言紀錄有新增', () => {

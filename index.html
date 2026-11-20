@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>出大事行事曆</title>
 <meta name="theme-color" content="#4f46e5">
+<meta property="og:title" content="出大事行事曆">
+<meta property="og:description" content="我們兩個人的行事曆">
+<meta name="robots" content="noindex">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📅</text></svg>">
 <style>
 :root {
@@ -372,7 +375,7 @@ const DOW = '日一二三四五六';
 const WIDE = window.matchMedia('(min-width: 768px)');
 
 const state = {
-  passcode: '',
+  key: '',
   me: '',
   members: [],
   wideMode: 'week3',
@@ -431,11 +434,11 @@ function fmtWhen(ev) {
   return fmtDay(ev.startDate) + ' ' + fmtTime(ev);
 }
 
-/* 儲存在這支手機的設定（通關密語、身分、上次的資料） */
+/* 儲存在這支手機的設定（鑰匙、身分、上次的資料） */
 function loadStore() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
-    state.passcode = saved.passcode || '';
+    state.key = saved.key || '';
     state.me = saved.me || '';
     state.members = saved.members || [];
     state.wideMode = saved.wideMode || 'week3';
@@ -449,7 +452,7 @@ function loadStore() {
 function saveStore() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
-      passcode: state.passcode, me: state.me, members: state.members, wideMode: state.wideMode,
+      key: state.key, me: state.me, members: state.members, wideMode: state.wideMode,
       byId: state.byId, todo: state.todo, waiting: state.waiting,
     }));
   } catch (e) {
@@ -457,8 +460,14 @@ function saveStore() {
   }
 }
 
+/* 秘密連結網址最後的 #k=鑰匙；# 後面不會送到 GitHub，只有這支手機看得到 */
+function keyFromLink() {
+  const match = location.hash.match(/(?:^#|&)k=([A-Za-z0-9]+)/);
+  return match ? match[1] : '';
+}
+
 function apiUrl() {
-  // 本機測試才允許用網址參數換後端，避免別人用連結把通關密語騙走
+  // 本機測試才允許用網址參數換後端，避免別人用連結把鑰匙騙走
   if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
     const override = new URLSearchParams(location.search).get('api');
     if (override) { return override; }
@@ -473,7 +482,7 @@ function makeError(message, code) {
 }
 
 async function api(action, data) {
-  const body = Object.assign({ action: action, passcode: state.passcode, who: state.me }, data || {});
+  const body = Object.assign({ action: action, key: state.key, who: state.me }, data || {});
   let res;
   try {
     // 用 text/plain 送，瀏覽器才不會先送 CORS 預檢（GAS 不接）
@@ -1110,23 +1119,19 @@ async function submitEdit(form) {
 }
 
 function handleError(err) {
-  if (err.code === 'PASSCODE') {
-    state.passcode = '';
+  if (err.code === 'KEY' || err.code === 'NO_KEY') {
+    state.key = '';
     saveStore();
     closeSheet();
-    showGate('pass', '通關密語不對，請重新輸入');
-    return;
-  }
-  if (err.code === 'NO_PASSCODE') {
-    closeSheet();
-    showGate('pass', err.message);
+    showGate('nokey', err.message);
     return;
   }
   if (err.code === 'WHO') {
     state.me = '';
+    state.members = [];
     saveStore();
     closeSheet();
-    showGate('who', err.message);
+    startWho(err.message);
     return;
   }
   toast(err.message, true);
@@ -1134,7 +1139,7 @@ function handleError(err) {
 }
 
 async function refresh() {
-  if (!apiUrl() || !state.passcode || !state.me) { return; }
+  if (!apiUrl() || !state.key || !state.me) { return; }
   const range = currentRange();
   state.listSeq += 1;
   const seq = state.listSeq;
@@ -1163,23 +1168,24 @@ async function refresh() {
   }
 }
 
-/* 第一次使用：輸入通關密語、選身分 */
+/* 第一次使用：選身分 */
 function showGate(step, message) {
   const gate = $('#gate');
-  if (step === 'who' && state.members.length === 0) { step = 'pass'; }
   let html = '<div class="gate-card">';
   if (step === 'nourl') {
     html += '<h2>還沒接上後端</h2><p>請在 index.html 的 API_URL 填入 GAS 網頁應用程式的網址（…/exec）。</p>';
-  } else if (step === 'pass') {
-    html += '<h2>出大事行事曆</h2><p>請輸入通關密語（試算表「設定」分頁裡的那一組）。</p>'
-      + '<form id="passForm"><input type="password" name="pass" autocomplete="current-password" placeholder="通關密語">'
-      + '<div class="btns"><button type="submit" class="btn primary">下一步</button></div></form>';
+  } else if (step === 'nokey') {
+    html += '<h2>出大事行事曆</h2><p>請用秘密連結打開。連結在試算表「設定」分頁的「秘密連結」那一列，用這支手機點一次就會記住。</p>';
+  } else if (step === 'loading') {
+    html += '<h2>出大事行事曆</h2><p>讀取中…</p>';
+  } else if (step === 'error') {
+    html += '<h2>出大事行事曆</h2><p>連不上後端。</p>'
+      + '<div class="btns"><button class="btn primary" data-act="retry-who">再試一次</button></div>';
   } else {
     html += '<h2>你是哪一位？</h2><p>這支手機以後都用這個身分，可以從右上角切換。</p><div class="btns">';
     state.members.forEach(function (name) {
       html += '<button class="btn primary" data-act="pick-me" data-name="' + esc(name) + '">我是' + esc(name) + '</button>';
     });
-    html += '<button class="btn" data-act="logout">換通關密語</button>';
     if (state.me) { html += '<button class="btn" data-act="gate-close">不用換</button>'; }
     html += '</div>';
   }
@@ -1187,29 +1193,27 @@ function showGate(step, message) {
   html += '</div>';
   gate.innerHTML = html;
   gate.hidden = false;
-  const input = gate.querySelector('input');
-  if (input) { input.focus(); }
 }
 
-async function submitPass(form) {
-  const pass = form.elements.pass.value.trim();
-  if (!pass) { return; }
-  state.passcode = pass;
+/* 先跟後端拿兩個人的名字，再請使用者選 */
+async function startWho(message) {
+  if (state.members.length > 0) {
+    showGate('who', message);
+    return;
+  }
+  showGate('loading');
   busy(1);
   try {
     const res = await api('hello', {});
     state.members = res.members;
-    if (state.members.indexOf(state.me) < 0) { state.me = ''; }
     saveStore();
-    if (state.me) {
-      $('#gate').hidden = true;
-      refresh();
-    } else {
-      showGate('who');
-    }
+    showGate('who', message);
   } catch (err) {
-    state.passcode = '';
-    showGate('pass', err.message);
+    if (err.code === 'KEY' || err.code === 'NO_KEY') {
+      handleError(err);
+    } else {
+      showGate('error', err.message);
+    }
   } finally {
     busy(-1);
   }
@@ -1253,20 +1257,10 @@ document.addEventListener('click', function (e) {
     return;
   }
   if (act === 'refresh') { refresh(); return; }
-  if (act === 'me') { showGate('who'); return; }
+  if (act === 'me') { startWho(); return; }
+  if (act === 'retry-who') { startWho(); return; }
   if (act === 'pick-me') { pickMe(target.dataset.name); return; }
   if (act === 'gate-close') { $('#gate').hidden = true; return; }
-  if (act === 'logout') {
-    state.passcode = '';
-    state.me = '';
-    state.byId = {};
-    state.todo = [];
-    state.waiting = [];
-    saveStore();
-    renderMain();
-    showGate('pass');
-    return;
-  }
   if (act === 'todo') { openSheet({ type: 'todo' }); return; }
   if (act === 'waiting') { openSheet({ type: 'waiting' }); return; }
   if (act === 'close') { closeSheet(); return; }
@@ -1295,7 +1289,6 @@ document.addEventListener('click', function (e) {
 document.addEventListener('submit', function (e) {
   e.preventDefault();
   if (e.target.id === 'editForm') { submitEdit(e.target); }
-  if (e.target.id === 'passForm') { submitPass(e.target); }
 });
 
 document.addEventListener('change', function (e) {
@@ -1343,8 +1336,18 @@ function init() {
   state.anchor = state.today;
   renderMain();
   if (!apiUrl()) { showGate('nourl'); return; }
-  if (!state.passcode) { showGate('pass'); return; }
-  if (!state.me || state.members.indexOf(state.me) < 0) { showGate('who'); return; }
+  const linkKey = keyFromLink();
+  if (linkKey && linkKey !== state.key) {
+    state.key = linkKey;
+    saveStore();
+  }
+  if (!state.key) { showGate('nokey'); return; }
+  if (!state.me || state.members.indexOf(state.me) < 0) {
+    state.me = '';
+    state.members = [];
+    startWho();
+    return;
+  }
   refresh();
 }
 

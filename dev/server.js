@@ -1,5 +1,5 @@
 // 本機測試伺服器：node dev/server.js，然後開 http://localhost:8787/?api=/exec
-// 後端跑的是真的 gas/Code.js，但試算表是記憶體裡的假資料，關掉就沒了。通關密語是 test。
+// 後端跑的是真的 gas/Code.js，但試算表是記憶體裡的假資料，關掉就沒了。
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -8,7 +8,8 @@ const { createGas } = require('./fake-gas');
 const PORT = Number(process.env.PORT || 8787);
 const gas = createGas();
 gas.context.setup();
-gas.spreadsheet.getSheetByName('設定').cells[1][1] = 'test';
+const settingRows = gas.spreadsheet.getSheetByName('設定').cells;
+const key = settingRows.find((r) => r[0] === '鑰匙')[1];
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function dayFromToday(offset) {
@@ -17,7 +18,7 @@ function dayFromToday(offset) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 function call(who, action, data) {
-  const res = gas.post(Object.assign({ action, passcode: 'test', who }, data));
+  const res = gas.post(Object.assign({ action, who, key }, data));
   if (!res.ok) throw new Error(res.error);
   return res.event;
 }
@@ -57,5 +58,5 @@ http.createServer((req, res) => {
   res.writeHead(404);
   res.end('not found');
 }).listen(PORT, () => {
-  console.log('http://localhost:' + PORT + '/?api=/exec  （通關密語 test）');
+  console.log('http://localhost:' + PORT + '/?api=/exec#k=' + key);
 });
