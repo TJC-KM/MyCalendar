@@ -29,7 +29,6 @@ const COLUMNS = [
   ['endTime', '結束時間'],
   ['period', '時段'],
   ['title', '標題'],
-  ['location', '地點'],
   ['who', '參加'],
   ['note', '備註'],
   ['status', '狀態'],
@@ -40,6 +39,7 @@ const COLUMNS = [
   ['createdAt', '建立時間'],
   ['updatedAt', '修改時間'],
   ['log', '留言紀錄'],
+  ['location', '地點'],
 ];
 
 /** 改了這些欄位，要另一個人重新確認；只改備註不用 */
